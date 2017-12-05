@@ -1,0 +1,524 @@
+---
+title: "Analytics with Pokémon!"
+author: "David Rothall"
+date: "5 December 2017"
+output:
+  html_document:
+    code_folding: hide
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE, fig.width=10)
+```
+
+```{r libraries, echo=FALSE}
+library(ggplot2)
+library(grid) # for textGrob 
+library(reshape2)
+library(RColorBrewer)
+library(ggExtra) # For scatterplot / histogram combination plot
+library(ggthemes) # for tufte box plot
+library(ggfortify) # For plotting Principal Components
+library(dplyr)
+library(knitr)
+library(gridExtra)
+library(stats) # for kmeans clustering
+library(Rtsne)
+library(kableExtra)
+```
+
+```{r additionalFunctions, echo=FALSE}
+# Function to generate correlation coefficient for the charts
+corr_eqn <- function(x,y, digits = 2) {
+  corr_coef <- round(cor(x, y), digits = digits)
+  paste("pearson r = ", corr_coef)
+}
+```
+
+## Introduciton and Aims
+
+The main aim is to learn some of the visualisations presented using the Pokémon dataset by [Alberto Barradas](https://www.kaggle.com/abcsds/pokemon). There are some neat little things we can do here. We'll then try to use the different Pokémon attributes to classify / predict the likeliest type of Pokémon, if any.
+
+## Dataset Structure
+
+Below shows the first few rows of the dataset, which contains the following information:
+
+- Pokémon name and number (some numbers are repeated but are simply 'Mega' forms of the original Pokémon)
+- 2 Types, e.g. Water, Dragon, Steel, Fire etc. Some Pokémon only have one type
+- Attributes HP, Attack, Defense, Special Attack/Defense and Speed. Also contained is the sum of these attributes, the Total variable 
+- Generation number (up to 6)
+- Legendary Status to denote epic Pokémon
+
+
+```{r summary}
+pokemon = read.csv("Pokemon.csv")
+# going to reference this pokemonCluster later on
+pokemonCluster <- pokemon %>%
+    select(Name:Type.2, Total:Speed)
+
+# Below code is the equivalent of str(Pokémon) but with better formatting
+data.frame(variable = names(pokemon),
+           class = sapply(pokemon, class),
+           first_values = sapply(
+               pokemon, function(x) paste0(head(x),  collapse = ", ")),
+           row.names = NULL) %>% 
+  kable()
+
+
+```
+
+We should probably clean up the Pokémon names in the dataset as there seem to be repetitions with the 'Mega' variety, e.g. "AbomasnowMega" as seen above. There are others with squashed names later on such as "PumpkabooAverage Size" so we'll clean those up too.
+
+```{r grepMega}
+# Clean names that are supposed to start with "Mega"
+pokemon$Name = gsub(".*Mega", "Mega",pokemon$Name,ignore.case=T)
+
+# Separate names a little bit more
+for (name in c(
+    "Deoxys", "Wormadam", "Pumpkaboo", "Gourgeist", "Aegislash",
+    "Meowstic", "Tornadus", "Thundurus", "Landorus", "Kyurem",
+    "Keldeo", "Meloetta", "Darmanitan", "Giratina", "Shaymin", 
+    "Rotom", "Kyogre", "Groudon"
+)){
+    pokemon$Name = gsub(
+            paste0("^", name), paste0(name, " "),pokemon$Name)
+}
+
+# Fix back names in previous list that now look like "Rotom " and "Kyurem "
+for(name in c("Kyurem", "Rotom", "Kyogre", "Groudon")){
+    pokemon$Name = gsub(
+            paste0("^", name, " $"), name ,pokemon$Name)
+}
+
+kable(head(pokemon))
+```
+
+
+## Replicating the Python - Seaborn package
+
+Next, we're going to replicate what the [Seaborn Kernel](https://www.kaggle.com/ndrewgele/visualizing-pok-mon-stats-with-seaborn) in Python by Andrew Gelé can do, just to show off some cool visualisations. It's also to show that the same visualisations created in Python can be reproduced in R as well. 
+
+So firstly, a scatter plot / histogram combination. On the left is shown the generic plot that R can produce, using the ggplot2 and ggExtra packages and the right shows a fancier more colourful version, both of which can be constructed using some simple enough code.
+
+```{r seabornScatterplot}
+# Firstly, drop unnecessary X., Legendary, Generation, Total columns
+pokemonSeaborn = pokemon %>% 
+    select(Name:Type.2, HP:Speed)
+
+# Then we can make a simple scatterplot / histogram combination
+p <- ggplot(pokemonSeaborn, aes(HP, Attack)) + 
+    geom_point() +
+    geom_smooth(method=lm, se=FALSE) +
+    geom_text(x = 190, y = 190, label = corr_eqn(
+        pokemonSeaborn$HP,
+        pokemonSeaborn$Attack))
+p <- ggMarginal(p, type = "histogram")
+
+# Let's make it fancy, blue, and also a box plot in the margins.
+pColour <- ggplot(pokemonSeaborn, aes(HP, Attack)) + 
+    geom_point(colour='blue') + 
+    geom_smooth(method=lm, se=FALSE) +
+    theme_classic() +
+    geom_text(x = 190, y = 190, label = corr_eqn(
+        pokemonSeaborn$HP,
+        pokemonSeaborn$Attack))
+pColour <- ggMarginal(pColour, type = "boxplot", fill='blue')
+
+grid.arrange(p, pColour, ncol=2)
+```
+
+We can take a look at a box plot of a single variable easily enough, using the ggplot2 package. An example is shown on the left for the HP attribute. We can then show box plots of the 6 attributes all at once too, which provides a decent visualisation. The HP attribute for example is much less varied across the entire Pokémon set while the Attack, SP. Attack and Speed attributes vary a bit more. 
+
+```{r boxPlot}
+pBoxplot <- ggplot(pokemonSeaborn, aes(x='', y=HP)) +
+    stat_boxplot(geom ='errorbar') +
+    xlab("") +
+    geom_boxplot(fill='red')
+
+
+pBoxPlots <- ggplot(data= melt(pokemonSeaborn), aes(x=variable, y=value)) +
+    stat_boxplot(geom ='errorbar') +
+    geom_boxplot(aes(fill=variable))
+
+
+grid.arrange(pBoxplot, pBoxPlots, ncol=2, widths=1:2)
+```
+
+### Swarm Plots {.tabset}
+
+How about if we want insights on Pokémon attribute comparisons with their type? We can do that - the Seaborn package in Python uses Swarm Plots which can be manipulated easily enough. In R however the respective Swarm Plot method (using the beeswarm package) generates plots with non-overlapping data points and the resulting visualisations can become quite cluttered. 
+
+My original thought process was to simply try a jitter plot and to observe what happens. As shown this splits up all the data points by both type and attribute however the positions of the data points are randomly shifted horizontally. A better way to do this is to plot all of the data points for each attribute using a line plot, and then spreading out the data points in each type line by line, as shown in the second plot. This way the data points can overlap! Although there is a lot of information in this visualisation it still looks pretty cool!
+
+#### Jitter Plot
+```{r swarmPlotMessy}
+# Firstly, drop the Legendary and Generation columns
+pokemonSwarm = pokemonSeaborn %>% 
+    melt(id.vars=(c("Name", "Type.1", "Type.2")))
+
+# Define colours by extending those in the colorbrewer Set 1 palette
+# Cal also try Set3, Accent or Paired for cool effects
+colourCount = length(unique(pokemonSwarm$Type.1))
+getPalette = colorRampPalette(brewer.pal(9, "Set1"))
+
+# The Author (see top) recommended these colours instead
+colours = c("#8ED752", "#F95643", "#53AFFE", "#C3D221", "#BBBDAF",
+            "#AD5CA2", "#F8E64E", "#F0CA42", "#F9AEFE", "#A35449",
+            "#FB61B4", "#CDBD72", "#7673DA", "#66EBFF", "#8B76FF",
+            "#8E6856", "#C3C1D7", "#75A4F9")
+
+ggplot(pokemonSwarm, aes(x=variable, y=value)) +
+    geom_jitter(aes(colour=Type.1)) +
+    scale_color_manual(values = getPalette(18)) +
+    xlab("Attribute") + 
+    ylab("Value") + 
+    ggtitle("Pokemon Stats by Type 1") + 
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### Line Plot by Type
+```{r swarmPlotClean}
+ggplot(pokemonSwarm, aes(x=variable, y=value, color=Type.1)) +
+    geom_point(na.rm=TRUE, position=position_dodge(width=0.8), size=2) +
+    theme_bw() +
+    scale_color_manual(values = getPalette(18)) +
+    #scale_color_manual(values = colours) +
+    xlab("Attribute") + 
+    ylab("Value") + 
+    ggtitle("Pokemon Stats by Type 1") + 
+    labs(color='   Type 1') +
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+### Individual Attributes by Type {.tabset .tabset-fade}
+
+The above two plots summarises the Seaborn tutorial comparison, but what if we wanted to further explore the individual attributes by type? We could just do a box plot of a separate attribute such as HP, Defence etc. split by type. Plain box plots are boring though, let's try different styles!
+
+#### Box Plot (Attack)
+
+```{r boxPlotAttack}
+
+pokemonSwarmHP <- pokemonSwarm %>%
+    filter(variable=="Attack")
+pBoxPlots <- ggplot(data= pokemonSwarmHP, aes(x=Type.1, y=value)) +
+    geom_boxplot(aes(fill=Type.1), lwd=1.5) +
+    xlab("Type 1") +
+    ylab("Attack") +
+    theme_bw() +
+    theme(legend.position="none")
+pBoxPlots
+```
+
+#### Tufte Box Plot (Defense)
+
+```{r tuftePlot}
+
+pokemonSwarmHP <- pokemonSwarm %>%
+    filter(variable=="Defense")
+pBoxPlots <- ggplot(data= pokemonSwarmHP, aes(x=Type.1, y=value)) +
+    geom_tufteboxplot(aes(colour = Type.1, fill=Type.1), lwd=2) +
+    xlab("Type 1") +
+    ylab("Defense") +
+    theme_light() +
+    theme(legend.position="none")
+pBoxPlots
+```
+
+#### Violin Plot (Speed)
+
+```{r violinPlot}
+
+pokemonSwarmHP <- pokemonSwarm %>%
+    filter(variable=="Speed")
+pBoxPlots <- ggplot(data= pokemonSwarmHP, aes(x=Type.1, y=value)) +
+    geom_violin(aes(fill=Type.1), lwd=1.5) +
+    xlab("Type 1") +
+    ylab("Speed") +
+    theme_classic() +
+    theme(legend.position="none")
+pBoxPlots
+```
+
+###
+
+There are a couple of interesting insights to note from these plots:
+
+- From the box plot, Dragons have on average the highest attack power of all types, followed by Fighting and Rock types. Fairy and Psychic types are the weakest.
+- The middle Tufte plot shows minimal information however they are still quite powerful. It's easily noted that Steel types have the highest defense. Bugs are squishy, as predicted by their name :)
+- The violin plot yields interesting information about the densities of each type. For example, it's easy to tell that Flying, Dragon and Electric types are the fastest Pokémon and that Bug/Fairy types are the slowest, even slower than Rock/Steel types.
+
+The violin plot also shows that there are 2 regions of Flying types, either super fast or just plain average. We can then for example explore this insight and study which Pokémon are fast and which are slow.
+
+```{r flyingFastSlow}
+pokemonFliers <- pokemon %>%
+    filter(Type.1 == 'Flying')
+kable(pokemonFliers)
+```
+
+So it looks like the Noibat is the slow culprit, however it evolves into Noivern later on, which is a lot faster. Tornadus is of Legendary status, and starts off a fast flier anyway from the looks of it.
+
+### Prediction {.tabset .tabset-fade}
+
+[Mary Vikhreva's analysis](https://www.kaggle.com/vimary/tsne-vs-pca) uses Python to study whether two different dimension reduction techniques can differentiate Pokémon types or not. The first technique is the well known Principal Component Analysis which uses a linear combination of variables to explain the most amount of variance found in the dataset, and can provide insights into high dimension datasets. The second technique is called [t-Distributed Stochastic Neighbor Embedding (t-SNE)](https://distill.pub/2016/misread-tsne/), which is a highly effective method for visualising multidimensional data in 2 dimensions. While the technique is highly effective in visualising data it appears tricky to interpret as it relies on using hypergeometric / nonlinear algorithms to focus on both global and local effects simultaneously. Think about this in terms of modeling blood flow - you'd need to model both high flows in arteries as well as small flows in capillaries, which requires hypergeometric functions to model correctly.
+
+Below is the same comparison, performed in R instead. This requires the 'tsne' package. We'll use all of the attributes except its Generation to predict Pokémon Type 1. Firstly we need to normalise all of the data, since the Total attribute is on a larger scale than the rest of the variables. This way all of the variables will have mean 0 and standard deviation 1.
+
+We can then train 2 models, one using PCA and the other using t-SNE. Let's firstly plot all of the Pokémon and see if there are any overall predictions we can make. Shown below are the scatterplots using both models. It looks like both models predict a cluster that stands out. Are these the Legendary Pokémon? Let's find out... It looks like they are, and the t-SNE model better distinguishes Legendary Pokémon than the PCA model by the looks of it. Hence we can at least use t-SNE to predict the legendary Pokémon in our dataset.
+
+#### PCA Scatter Plot (Type 1)
+```{r trainModels}
+# Standardization stuff
+pokemon$Type1ID <- as.integer(pokemon$Type.1)
+pokemon$LegendaryID <- as.integer(pokemon$Legendary)
+pokemon$GenerationID <- pokemon$Generation # Preserve integer value of Gen
+
+features = c('Total', 'HP', 'Attack', 'Defense', 'Sp..Atk',
+             'Sp..Def', 'Speed', 'LegendaryID')
+
+pokemon[,features] =scale(pokemon[features])
+
+
+set.seed(789)
+pokemonTSNE <- Rtsne(pokemon[,features], eta=500, check_duplicates=FALSE)
+
+pokemonPCA <- prcomp(pokemon[,features], scale = TRUE)
+predictPCA <- predict(pokemonPCA, pokemon[,features])
+pokemonPCAcols <- cbind(pokemon, as.data.frame(predictPCA)[,1:2])
+
+ggplot(pokemonPCAcols, aes(x=PC1, y=PC2)) + 
+    geom_point(aes(fill=Type.1),
+               colour='black',
+               pch=21,
+               size=2) +
+    theme_bw()
+```
+
+#### PCA Scatterplot (Legendary)
+```{r PCAplot}
+ggplot(pokemonPCAcols, aes(x=PC1, y=PC2)) + 
+    geom_point(aes(fill=Legendary),
+               colour='black',
+               pch=21,
+               size=2) +
+    theme_bw()
+```
+
+#### t-SNE Scatter Plot (Type 1)
+```{r tSNEplotByType}
+pokemonTSNEcols <- cbind(pokemon, as.data.frame(pokemonTSNE$Y))
+ggplot(pokemonTSNEcols, aes(x=V1, y=V2)) + 
+    geom_point(aes(fill=Type.1),
+               colour='black',
+               pch=21,
+               size=2) +
+    theme_bw()
+```
+
+#### t-SNE Scatterplot (Legendary)
+```{r tSNEplot}
+# Easy fix to relate the TSNE components back to the data frame
+ggplot(pokemonTSNEcols, aes(x=V1, y=V2)) + 
+    geom_point(aes(fill=Legendary),
+               colour='black',
+               pch=21,
+               size=2) +
+    theme_bw()
+
+```
+
+###
+
+Let's plot 5 different Pokémon types against each other with the results from the t-SNE model. We should probably remove the legendary Pokémon from the dataset first though, as the TSNE layout depends on whether or not there are Legendary Pokémon in the dataset.
+
+```{r arrayPlotBYType, fig.height=10}
+pokemon <- pokemon[pokemon$Legendary == "False",]
+set.seed(789)
+pokemonTSNE <- Rtsne(pokemon[,features], eta=500, check_duplicates=FALSE)
+
+# removing the Generation variable destroys predictability of TSNE model
+#pokemonTSNE <- Rtsne(subset(pokemon[,features], select=-c(Generation)), eta=500, check_duplicates=FALSE)
+pokemonTSNEcols <- cbind(pokemon, as.data.frame(pokemonTSNE$Y))
+
+# Get a set of types by name
+# Get a set of type by ID
+# Calculate how many types there are in the set
+types1 <- unique(pokemon$Type.1)
+types1IDs <- unique(pokemon$Type1ID)
+numTypes1 <- length(types1)
+
+# Make a grid and a place to store plots
+start <- 10 # Used to plot different pokemon comparisons, can go up to 14
+g <- 5 # grid size
+p <- list()
+colours = c("red", "orange", "yellow", "green", "blue")
+
+# Construct plots
+for (row in 1:g){
+    for(col in 1:g){
+        Xi <- pokemonTSNEcols[which(pokemon$Type1ID == (start + row)),]
+        Xj <- pokemonTSNEcols[which(pokemon$Type1ID == (start + col)),]
+        p[[(row - 1)*g + col]] <- ggplot(Xi, aes(V1, V2)) + 
+            geom_point(colour='black', 
+                       fill = colours[row], 
+                       pch=21,
+                       size=2) +
+            geom_point(data=Xj,
+                       aes(V1, V2),
+                       colour='black',
+                       fill = colours[col],
+                       pch=21,
+                       size=2) +
+            theme_classic() +
+            xlab("") +
+            ylab("") +
+            ggtitle(paste(types1[[start+row]], 'Vs', types1[[start+col]])) +
+            theme(plot.title = element_text(hjust = 0.5))
+    }
+}
+# Print them out
+grid.arrange(grobs=p,
+             ncol=g,
+             top=textGrob('TSNE - Comparing different types of Pokémon',
+                          gp=gpar(fontsize=25))
+             )
+
+```
+
+It appears we can't make any predictions about Pokémon types here. The plots themselves look cool though.
+
+### Clustering {.tabset .tabset-fade}
+
+Let's do one last thing, and cluster the Pokémon into 4 different components. The left tab shows the clusters predicted by PCA, and t-SNE is shown in the right tab. We've removed the legendary pokemon for the time being to focus on the larger dataset present.
+
+#### PCA Clustering
+
+```{r clustering}
+# first, need to redo PCA without Legendary status
+# PCA isn't happy with the LegendaryID column having all False values
+features = c('Total', 'HP', 'Attack', 'Defense', 'Sp..Atk',
+             'Sp..Def', 'Speed')
+pokemonPCA <- prcomp(pokemon[,features], scale = TRUE)
+predictPCA <- predict(pokemonPCA, pokemon[,features])
+pokemonPCAcols <- cbind(pokemon, as.data.frame(predictPCA)[,1:2])
+
+kClusters = 4
+
+features1 = c('Total', 'HP', 'Attack', 'Defense', 'Sp..Atk', 'Sp..Def')
+
+set.seed(234)
+kmeansTSNE = kmeans(pokemonTSNEcols[,c('V1', 'V2')], 4)
+
+set.seed(345)
+kmeansPCA <- kmeans(pokemonPCAcols[,c('PC1', 'PC2')], 4)
+
+ggplot(pokemonPCAcols, aes(x=PC1, y=PC2)) + 
+    geom_point(aes(fill=factor(kmeansPCA$cluster)),
+               colour='black',
+               pch=21,
+               size=2) +
+    scale_fill_manual(values = c("black","red", 'green', 'blue')) +
+    guides(fill=guide_legend(title="Cluster")) +
+    theme_bw()
+```
+
+#### t-SNE Clustering
+
+```{r tSNEcluster}
+
+ggplot(pokemonTSNEcols, aes(x=V1, y=V2)) + 
+    geom_point(aes(fill=factor(kmeansTSNE$cluster)),
+               colour='black',
+               pch=21,
+               size=2) +
+    scale_fill_manual(values = c("black","red", 'green', 'blue')) +
+    guides(fill=guide_legend(title="Cluster")) +
+    theme_bw()
+
+
+
+#subplot(1,2,1)
+#scatter(X_tsne[:, 0], X_tsne[:, 1], c=cmap(kmeans_tsne.labels_ / num_clusters))
+#title('TSNE')
+#subplot(1,2,2)
+#scatter(X_pca[:, 0], X_pca[:, 1], c=cmap(kmeans_pca.labels_ / num_clusters))
+#title('PCA');
+```
+
+####
+
+### Cluster Pokémon Attributes {.tabset .tabset-fade}
+
+So both models predict reasonably clustered Pokémon sets. Which attributes do these different clusters have in them? We'll check the clusters using the t-SNE model.
+
+#### Cluster 1
+
+```{r cluster1BoxPlot}
+pokemonCluster = pokemonCluster[names(kmeansTSNE$cluster),]
+
+pokemonMeanKable <- kable(setNames(aggregate(pokemonCluster$Total, by=list(cluster=kmeansTSNE$cluster), mean), c('Cluster', 'Total')), 'html')
+
+pokemonCluster <- pokemonCluster %>% select(Name:Type.2, HP:Speed)
+
+TSNEcluster1 <- pokemonCluster[which(kmeansTSNE$cluster == 1),]
+ggplot(data= melt(TSNEcluster1), aes(x=variable, y=value)) +
+    stat_boxplot(geom ='errorbar') +
+    geom_boxplot(aes(fill=variable)) +
+    coord_cartesian(ylim = c(0, 175))
+```
+
+#### Cluster 2
+
+```{r cluster2BoxPlot}
+TSNEcluster2 <- pokemonCluster[which(kmeansTSNE$cluster == 2),]
+ggplot(data= melt(TSNEcluster2), aes(x=variable, y=value)) +
+    stat_boxplot(geom ='errorbar') +
+    geom_boxplot(aes(fill=variable)) +
+    coord_cartesian(ylim = c(0, 175))
+```
+
+#### Cluster 3
+
+```{r cluster3BoxPlot}
+TSNEcluster3 <- pokemonCluster[which(kmeansTSNE$cluster == 3),]
+ggplot(data= melt(TSNEcluster3), aes(x=variable, y=value)) +
+    stat_boxplot(geom ='errorbar') +
+    geom_boxplot(aes(fill=variable)) +
+    coord_cartesian(ylim = c(0, 175))
+```
+
+#### Cluster 4
+
+```{r cluster4BoxPlot}
+TSNEcluster4 <- pokemonCluster[which(kmeansTSNE$cluster == 4),]
+ggplot(data= melt(TSNEcluster4), aes(x=variable, y=value)) +
+    stat_boxplot(geom ='errorbar') +
+    geom_boxplot(aes(fill=variable)) +
+    coord_cartesian(ylim = c(0, 175))
+```
+
+###
+
+<table width="90%">
+<tr>
+<td>
+So a summary of the 4 clusters is as follows, with also referring to the table on the right displaying the mean sum of attributes for each cluster:
+
+- Cluster 1: High all-round stats focusing on Defense and Sp. Defense
+
+- Cluster 2: Very high all-round stats, more focusing on Sp. Attack, Sp. Defense and Speed
+
+- Cluster 3: Very low all-round stats
+
+- Cluster 4: Average all-round stats
+</td>
+<td align="right" valign="top">
+```{r clusterMeanTotal}
+
+pokemonMeanKable %>% kable_styling(full_width = F)
+
+```
+</td>
+</tr></table>
+
+So there are some neat little visualisations and techniques learned here that can be used in other projects, hopefully they are useful later on! If you've stopped by just to take a look at what I've done, thanks for reading!
